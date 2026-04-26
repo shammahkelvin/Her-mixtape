@@ -11,15 +11,68 @@ export default function SongPage() {
   const [currentTime, setCurrentTime] = useState('0:00')
   const [duration, setDuration] = useState('0:00')
   const [noteVisible, setNoteVisible] = useState(false)
-  const [bars, setBars] = useState(Array(40).fill(0.1))
+  const [bars, setBars] = useState(Array(40).fill(0.08))
   const audioRef = useRef(null)
   const animRef = useRef(null)
   const analyserRef = useRef(null)
-  const sourceRef = useRef(null)
   const audioCtxRef = useRef(null)
 
   useEffect(() => { if (id) fetchSong() }, [id])
   useEffect(() => { if (song) setTimeout(() => setNoteVisible(true), 2500) }, [song])
+
+  // Keep audio alive when screen locks
+  useEffect(() => {
+    const audio = audioRef.current
+    if (!audio) return
+
+    // Prevent browser from suspending audio on mobile
+    audio.setAttribute('playsinline', '')
+    audio.setAttribute('webkit-playsinline', '')
+
+    const handleVisibilityChange = () => {
+      // Page hidden (screen locked) — do nothing, let it keep playing
+      if (document.visibilityState === 'hidden') return
+      // Page visible again — resume analyser animation if playing
+      if (playing && analyserRef.current) animateBars()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }, [playing])
+
+  // Set up Media Session so lock screen controls work (like Spotify)
+  useEffect(() => {
+    if (!song || !('mediaSession' in navigator)) return
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: song.title,
+      artist: song.artist,
+      album: 'A mixtape for you ♡',
+      artwork: [
+        { src: song.cover_url, sizes: '512x512', type: 'image/jpeg' },
+      ],
+    })
+
+    navigator.mediaSession.setActionHandler('play', () => {
+      audioRef.current?.play()
+      setPlaying(true)
+    })
+    navigator.mediaSession.setActionHandler('pause', () => {
+      audioRef.current?.pause()
+      setPlaying(false)
+    })
+    navigator.mediaSession.setActionHandler('seekto', (e) => {
+      if (audioRef.current && e.seekTime != null) {
+        audioRef.current.currentTime = e.seekTime
+      }
+    })
+    navigator.mediaSession.setActionHandler('seekbackward', () => {
+      if (audioRef.current) audioRef.current.currentTime -= 10
+    })
+    navigator.mediaSession.setActionHandler('seekforward', () => {
+      if (audioRef.current) audioRef.current.currentTime += 10
+    })
+  }, [song])
 
   async function fetchSong() {
     const { data } = await supabase.from('songs').select('*').eq('id', id).single()
@@ -43,7 +96,6 @@ export default function SongPage() {
     analyser.connect(ctx.destination)
     audioCtxRef.current = ctx
     analyserRef.current = analyser
-    sourceRef.current = source
   }
 
   function animateBars() {
@@ -52,10 +104,9 @@ export default function SongPage() {
     analyserRef.current.getByteFrequencyData(data)
     const count = 40
     const step = Math.floor(data.length / count)
-    const next = Array.from({ length: count }, (_, i) => {
-      const val = data[i * step] / 255
-      return Math.max(0.05, val)
-    })
+    const next = Array.from({ length: count }, (_, i) =>
+      Math.max(0.05, (data[i * step] / 255))
+    )
     setBars(next)
     animRef.current = requestAnimationFrame(animateBars)
   }
@@ -68,12 +119,14 @@ export default function SongPage() {
       cancelAnimationFrame(animRef.current)
       setBars(Array(40).fill(0.08))
       setPlaying(false)
+      navigator.mediaSession && (navigator.mediaSession.playbackState = 'paused')
     } else {
       setupAnalyser(audio)
-      if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume()
+      if (audioCtxRef.current?.state === 'suspended') await audioCtxRef.current.resume()
       await audio.play()
       animateBars()
       setPlaying(true)
+      navigator.mediaSession && (navigator.mediaSession.playbackState = 'playing')
     }
   }
 
@@ -82,6 +135,15 @@ export default function SongPage() {
     if (!a) return
     setProgress((a.currentTime / a.duration) * 100 || 0)
     setCurrentTime(formatTime(a.currentTime))
+
+    // Keep Media Session position state in sync (enables lock screen scrubbing)
+    if ('mediaSession' in navigator && !isNaN(a.duration)) {
+      navigator.mediaSession.setPositionState({
+        duration: a.duration,
+        playbackRate: a.playbackRate,
+        position: a.currentTime,
+      })
+    }
   }
 
   function onLoaded() {
@@ -105,36 +167,26 @@ export default function SongPage() {
     <div style={{ minHeight: '100vh', background: '#fdf6f0', display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0 24px 60px', fontFamily: 'DM Sans, sans-serif' }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;1,300&family=DM+Sans:wght@300;400&display=swap');
-
         @keyframes spin { to { transform: rotate(360deg) } }
         @keyframes vinylSpin { to { transform: rotate(360deg) } }
         @keyframes fadeUp { from { opacity:0; transform:translateY(16px) } to { opacity:1; transform:translateY(0) } }
-        @keyframes pulse { 0%,100%{transform:scaleY(1)} 50%{transform:scaleY(1.4)} }
-
         .vinyl-outer {
-          width: 280px; height: 280px;
-          border-radius: 50%;
-          position: relative;
+          width: 280px; height: 280px; border-radius: 50%; position: relative;
           animation: ${playing ? 'vinylSpin 4s linear infinite' : 'none'};
-          transition: box-shadow 0.4s;
           box-shadow: ${playing ? '0 20px 60px rgba(180,100,80,0.35)' : '0 8px 32px rgba(180,100,80,0.15)'};
+          transition: box-shadow 0.4s;
         }
-
         .back-btn {
-          align-self: flex-start;
-          margin: 20px 0 32px;
+          align-self: flex-start; margin: 20px 0 32px;
           font-size: 12px; color: #a08878; cursor: pointer;
           display: flex; align-items: center; gap: 6px;
-          background: none; border: none; font-family: inherit;
-          transition: color 0.2s;
+          background: none; border: none; font-family: inherit; transition: color 0.2s;
         }
         .back-btn:hover { color: #2d1f1a }
-
         .note-box {
           opacity: 0; transform: translateY(16px);
           animation: ${noteVisible ? 'fadeUp 1s ease forwards' : 'none'};
         }
-
         .play-btn {
           width: 60px; height: 60px; border-radius: 50%;
           background: #e0806a; border: none; cursor: pointer;
@@ -153,7 +205,6 @@ export default function SongPage() {
         back to mixtape
       </button>
 
-      {/* ── VINYL ── */}
       <div className="vinyl-outer">
         <svg width="280" height="280" viewBox="0 0 280 280" style={{ borderRadius: '50%', display: 'block' }}>
           <defs>
@@ -165,37 +216,20 @@ export default function SongPage() {
               <stop offset="60%" stopColor="rgba(0,0,0,0.55)"/>
               <stop offset="100%" stopColor="rgba(0,0,0,0.75)"/>
             </radialGradient>
-            <radialGradient id="grooves" cx="50%" cy="50%" r="50%">
-              <stop offset="30%" stopColor="rgba(0,0,0,0)"/>
-              <stop offset="100%" stopColor="rgba(0,0,0,0.4)"/>
-            </radialGradient>
           </defs>
-
-          {/* Cover image fills the disc */}
           <circle cx="140" cy="140" r="140" fill="url(#cover)"/>
-
-          {/* Dark vinyl overlay so grooves show */}
           <circle cx="140" cy="140" r="140" fill="url(#vinylGrad)"/>
-
-          {/* Groove rings */}
           {[40,55,70,85,100,112,122,130].map(r => (
             <circle key={r} cx="140" cy="140" r={r} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="1"/>
           ))}
-
-          {/* Label circle in the center */}
           <circle cx="140" cy="140" r="38" fill="url(#cover)" opacity="0.9"/>
           <circle cx="140" cy="140" r="38" fill="rgba(0,0,0,0.3)"/>
-
-          {/* Spindle hole */}
           <circle cx="140" cy="140" r="6" fill="#fdf6f0"/>
           <circle cx="140" cy="140" r="3" fill="#e0806a"/>
-
-          {/* Shine */}
           <ellipse cx="100" cy="90" rx="40" ry="20" fill="rgba(255,255,255,0.06)" transform="rotate(-30 100 90)"/>
         </svg>
       </div>
 
-      {/* ── SONG INFO ── */}
       <div style={{ textAlign: 'center', margin: '28px 0 20px' }}>
         <h1 style={{ fontFamily: 'Cormorant Garamond, serif', fontSize: 30, fontWeight: 300, color: '#2d1f1a', lineHeight: 1.2, marginBottom: 6 }}>
           {song.title}
@@ -203,39 +237,31 @@ export default function SongPage() {
         <p style={{ fontSize: 14, color: '#a08878' }}>{song.artist}</p>
       </div>
 
-      {/* ── WAVEFORM ── */}
+      {/* Waveform */}
       <div style={{ width: '100%', maxWidth: 340, marginBottom: 10 }}>
-        <div
-          style={{ display: 'flex', alignItems: 'center', gap: 2, height: 56, cursor: 'pointer', padding: '0 2px' }}
-          onClick={seek}
-        >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2, height: 56, cursor: 'pointer', padding: '0 2px' }} onClick={seek}>
           {bars.map((h, i) => {
             const pct = (i / bars.length) * 100
             const played = pct <= progress
             return (
-              <div
-                key={i}
-                style={{
-                  flex: 1,
-                  height: `${Math.max(8, h * 52)}px`,
-                  borderRadius: 3,
-                  background: played
-                    ? `rgba(224,128,106,${0.6 + h * 0.4})`
-                    : `rgba(240,216,208,${0.5 + h * 0.3})`,
-                  transition: playing ? 'height 0.1s ease, background 0.2s' : 'background 0.3s',
-                }}
-              />
+              <div key={i} style={{
+                flex: 1,
+                height: `${Math.max(8, h * 52)}px`,
+                borderRadius: 3,
+                background: played
+                  ? `rgba(224,128,106,${0.6 + h * 0.4})`
+                  : `rgba(240,216,208,${0.5 + h * 0.3})`,
+                transition: playing ? 'height 0.1s ease, background 0.2s' : 'background 0.3s',
+              }}/>
             )
           })}
         </div>
-        {/* Times */}
         <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6 }}>
           <span style={{ fontSize: 11, color: '#c4a89c' }}>{currentTime}</span>
           <span style={{ fontSize: 11, color: '#c4a89c' }}>{duration}</span>
         </div>
       </div>
 
-      {/* ── PLAY BUTTON ── */}
       <div style={{ margin: '8px 0 32px' }}>
         <button className="play-btn" onClick={togglePlay}>
           {playing ? (
@@ -251,7 +277,6 @@ export default function SongPage() {
         </button>
       </div>
 
-      {/* ── NOTE ── */}
       <div className="note-box" style={{ width: '100%', maxWidth: 340, background: '#fff5f0', border: '1px solid #f0d0c4', borderRadius: 20, padding: '24px 26px', position: 'relative', overflow: 'hidden' }}>
         <span style={{ position: 'absolute', right: 12, top: -10, fontFamily: 'Cormorant Garamond, serif', fontSize: 90, color: '#f5c5b5', opacity: 0.5, lineHeight: 1, userSelect: 'none' }}>"</span>
         <p style={{ fontSize: 10, letterSpacing: '2.5px', textTransform: 'uppercase', color: '#c09080', marginBottom: 12 }}>a little note</p>
@@ -261,13 +286,21 @@ export default function SongPage() {
         <p style={{ textAlign: 'right', fontSize: 13, color: '#b09088', marginTop: 16 }}>— with love, always ♡</p>
       </div>
 
+      {/* crossOrigin is critical for Web Audio API + lock screen */}
       <audio
         ref={audioRef}
         src={song.audio_url}
         onTimeUpdate={onTimeUpdate}
         onLoadedMetadata={onLoaded}
-        onEnded={() => { setPlaying(false); setBars(Array(40).fill(0.08)); cancelAnimationFrame(animRef.current) }}
+        onEnded={() => {
+          setPlaying(false)
+          setBars(Array(40).fill(0.08))
+          cancelAnimationFrame(animRef.current)
+          navigator.mediaSession && (navigator.mediaSession.playbackState = 'paused')
+        }}
         crossOrigin="anonymous"
+        playsInline
+        preload="metadata"
       />
     </div>
   )
