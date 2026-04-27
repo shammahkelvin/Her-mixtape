@@ -4,55 +4,75 @@ import { supabase } from '../../lib/supabase'
 
 export default function SongPage() {
   const router = useRouter()
-  const { id } = router.query
+  const { id, auto } = router.query
   const [song, setSong] = useState(null)
+  const [songs, setSongs] = useState([])
   const [playing, setPlaying] = useState(false)
   const [progress, setProgress] = useState(0)
   const [currentTime, setCurrentTime] = useState('0:00')
   const [duration, setDuration] = useState('0:00')
   const [noteVisible, setNoteVisible] = useState(false)
   const [bars, setBars] = useState(Array(40).fill(0.08))
+  const [shouldAutoplay, setShouldAutoplay] = useState(false)
   const audioRef = useRef(null)
   const animRef = useRef(null)
   const analyserRef = useRef(null)
   const audioCtxRef = useRef(null)
 
+  useEffect(() => {
+    if (!router.isReady) return
+    setShouldAutoplay(auto === '1')
+  }, [auto, router.isReady])
+
   useEffect(() => { if (id) fetchSong() }, [id])
   useEffect(() => { if (song) setTimeout(() => setNoteVisible(true), 2500) }, [song])
+
+  useEffect(() => {
+    if (!song || !shouldAutoplay) return
+    const audio = audioRef.current
+    if (!audio) return
+
+    const tryPlay = async () => {
+      setupAnalyser(audio)
+      if (audioCtxRef.current?.state === 'suspended') await audioCtxRef.current.resume()
+      await audio.play()
+      animateBars()
+      setPlaying(true)
+      navigator.mediaSession && (navigator.mediaSession.playbackState = 'playing')
+    }
+
+    if (audio.readyState >= 2) {
+      void tryPlay()
+      return
+    }
+
+    audio.addEventListener('canplay', tryPlay, { once: true })
+    return () => audio.removeEventListener('canplay', tryPlay)
+  }, [song, shouldAutoplay])
 
   // Keep audio alive when screen locks
   useEffect(() => {
     const audio = audioRef.current
     if (!audio) return
-
-    // Prevent browser from suspending audio on mobile
     audio.setAttribute('playsinline', '')
     audio.setAttribute('webkit-playsinline', '')
-
     const handleVisibilityChange = () => {
-      // Page hidden (screen locked) — do nothing, let it keep playing
       if (document.visibilityState === 'hidden') return
-      // Page visible again — resume analyser animation if playing
       if (playing && analyserRef.current) animateBars()
     }
-
     document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange)
   }, [playing])
 
-  // Set up Media Session so lock screen controls work (like Spotify)
+  // Media Session for lock screen controls
   useEffect(() => {
     if (!song || !('mediaSession' in navigator)) return
-
     navigator.mediaSession.metadata = new MediaMetadata({
       title: song.title,
       artist: song.artist,
       album: 'A mixtape for you ♡',
-      artwork: [
-        { src: song.cover_url, sizes: '512x512', type: 'image/jpeg' },
-      ],
+      artwork: [{ src: song.cover_url, sizes: '512x512', type: 'image/jpeg' }],
     })
-
     navigator.mediaSession.setActionHandler('play', () => {
       audioRef.current?.play()
       setPlaying(true)
@@ -61,10 +81,10 @@ export default function SongPage() {
       audioRef.current?.pause()
       setPlaying(false)
     })
+    navigator.mediaSession.setActionHandler('nexttrack', () => playNext())
     navigator.mediaSession.setActionHandler('seekto', (e) => {
-      if (audioRef.current && e.seekTime != null) {
+      if (audioRef.current && e.seekTime != null)
         audioRef.current.currentTime = e.seekTime
-      }
     })
     navigator.mediaSession.setActionHandler('seekbackward', () => {
       if (audioRef.current) audioRef.current.currentTime -= 10
@@ -75,8 +95,24 @@ export default function SongPage() {
   }, [song])
 
   async function fetchSong() {
-    const { data } = await supabase.from('songs').select('*').eq('id', id).single()
-    setSong(data)
+    const { data: current } = await supabase
+      .from('songs').select('*').eq('id', id).single()
+    setSong(current)
+
+    const { data: all } = await supabase
+      .from('songs').select('id').order('created_at', { ascending: true })
+    setSongs(all || [])
+  }
+
+  function playNext() {
+    cancelAnimationFrame(animRef.current)
+    const currentIndex = songs.findIndex(s => s.id === id)
+    const next = songs[currentIndex + 1]
+    if (next) {
+      router.push(`/song/${next.id}?auto=1`)
+    } else {
+      router.push('/')
+    }
   }
 
   function formatTime(s) {
@@ -105,7 +141,7 @@ export default function SongPage() {
     const count = 40
     const step = Math.floor(data.length / count)
     const next = Array.from({ length: count }, (_, i) =>
-      Math.max(0.05, (data[i * step] / 255))
+      Math.max(0.05, data[i * step] / 255)
     )
     setBars(next)
     animRef.current = requestAnimationFrame(animateBars)
@@ -130,13 +166,16 @@ export default function SongPage() {
     }
   }
 
+  // Single onLoaded — handles duration only
+  function onLoaded() {
+    setDuration(formatTime(audioRef.current?.duration))
+  }
+
   function onTimeUpdate() {
     const a = audioRef.current
     if (!a) return
     setProgress((a.currentTime / a.duration) * 100 || 0)
     setCurrentTime(formatTime(a.currentTime))
-
-    // Keep Media Session position state in sync (enables lock screen scrubbing)
     if ('mediaSession' in navigator && !isNaN(a.duration)) {
       navigator.mediaSession.setPositionState({
         duration: a.duration,
@@ -144,10 +183,6 @@ export default function SongPage() {
         position: a.currentTime,
       })
     }
-  }
-
-  function onLoaded() {
-    setDuration(formatTime(audioRef.current?.duration))
   }
 
   function seek(e) {
@@ -196,6 +231,11 @@ export default function SongPage() {
         }
         .play-btn:hover { background: #c86a55; transform: scale(1.06) }
         .play-btn:active { transform: scale(0.96) }
+        .skip-btn {
+          background: none; border: none; cursor: pointer; opacity: 0.45;
+          display: flex; align-items: center; transition: opacity 0.2s;
+        }
+        .skip-btn:hover { opacity: 1 }
       `}</style>
 
       <button className="back-btn" onClick={() => { cancelAnimationFrame(animRef.current); router.push('/') }}>
@@ -262,7 +302,13 @@ export default function SongPage() {
         </div>
       </div>
 
-      <div style={{ margin: '8px 0 32px' }}>
+      {/* Controls: skip button + play button */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 28, margin: '8px 0 32px' }}>
+        <button className="skip-btn" onClick={playNext} title="Next song">
+          <svg width="22" height="22" viewBox="0 0 22 22" fill="#2d1f1a">
+            <path d="M4 4l10 7-10 7V4zm12 0v14h2V4h-2z"/>
+          </svg>
+        </button>
         <button className="play-btn" onClick={togglePlay}>
           {playing ? (
             <svg width="20" height="20" viewBox="0 0 20 20" fill="white">
@@ -286,18 +332,12 @@ export default function SongPage() {
         <p style={{ textAlign: 'right', fontSize: 13, color: '#b09088', marginTop: 16 }}>— with love, always ♡</p>
       </div>
 
-      {/* crossOrigin is critical for Web Audio API + lock screen */}
       <audio
         ref={audioRef}
         src={song.audio_url}
         onTimeUpdate={onTimeUpdate}
         onLoadedMetadata={onLoaded}
-        onEnded={() => {
-          setPlaying(false)
-          setBars(Array(40).fill(0.08))
-          cancelAnimationFrame(animRef.current)
-          navigator.mediaSession && (navigator.mediaSession.playbackState = 'paused')
-        }}
+        onEnded={playNext}
         crossOrigin="anonymous"
         playsInline
         preload="metadata"

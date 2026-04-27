@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 
-const ADMIN_PASSWORD = 'kelannie'
+const ADMIN_PASSWORD = process.env.NEXT_PUBLIC_PASSWORD_ADMIN
 
 export default function Admin() {
   const [auth, setAuth] = useState(false)
